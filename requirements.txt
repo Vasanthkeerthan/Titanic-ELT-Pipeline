@@ -1,0 +1,5 @@
+pandas
+seaborn
+SQLAlchemy>=2.0,<2.1
+mysql-connector-python
+python-dotenv
