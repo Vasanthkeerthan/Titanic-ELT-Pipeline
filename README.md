@@ -114,9 +114,26 @@ python .\run_elt.py
 
 The runner creates a UUID batch, loads the raw snapshot, then executes `sql/01_staging.sql` through `sql/04_data_quality.sql` in that order. It prints each check as `[PASS]` or `[FAIL]`; a failed check or pipeline error returns a nonzero exit code.
 
+### Latest verified run
+
+The pipeline was run against the configured MySQL server. It loaded the Seaborn dataset, executed all four SQL scripts, and produced the following results:
+
+| Verification | Result |
+|---|---:|
+| Raw rows | 891 |
+| Staging rows | 891 |
+| Clean rows | 891 |
+| Data-quality checks passed | 5 of 6 |
+| Data-quality checks failed | 1 |
+| Analytics views found | 3 |
+
+`no_duplicate_passengers` failed because the source contains 53 repeated profiles (107 additional rows across those profiles). These are matches across all 15 source columns, not confirmed duplicate passengers: the dataset has no unique passenger ID. The project preserves these rows, so this check failure makes the pipeline exit with a nonzero status. The other five checks passed. This is the observed result of one run, not a guarantee for future runs.
+
+The Python unit suite also passed: **5 tests passed**. These unit tests cover SQL statement splitting and check-result reporting; they do not validate MySQL behavior by themselves.
+
 ## Verify results
 
-Run these examples in MySQL Workbench or another MySQL client after a successful pipeline run:
+Run these examples in MySQL Workbench or another MySQL client after the pipeline has loaded and transformed the source. The pipeline can return a nonzero status if a data-quality check fails, while the loaded tables and views remain available for inspection:
 
 ```sql
 SHOW TABLES;
@@ -140,7 +157,7 @@ ORDER BY checked_at DESC
 LIMIT 6;
 ```
 
-The analytics queries return the displayed columns; row values depend on the loaded dataset and are intentionally not presented as pre-verified sample output. More row-count, NULL, duplicate-profile, schema, and raw-to-clean checks are in [`docs/data-quality.md`](docs/data-quality.md).
+The analytics queries return the displayed columns; survival-result values depend on the loaded dataset and are not included here as measured output. More row-count, NULL, duplicate-profile, schema, and raw-to-clean checks are in [`docs/data-quality.md`](docs/data-quality.md).
 
 Example result shape for `vw_survival_by_class_sex` (the row below is a placeholder, not a measured result):
 
@@ -178,4 +195,4 @@ Example result shape for `vw_survival_by_class_sex` (the row below is a placehol
 - **Data-quality failure:** inspect the run's `dq_results` rows using its batch ID. A duplicate check groups by all 15 source fields and is a duplicate-*profile* check, not proof of passenger identity. The source has no unique passenger ID, so identical profiles may represent distinct people; records are preserved and not deduplicated.
 - **Raw refresh failure:** the prior raw table is left in place until the checked temporary table is ready for atomic rename.
 
-The repository currently has no captured database execution screenshots or live MySQL results. The automated tests cover Python helper behavior; they do not replace running the pipeline against a configured MySQL server.
+No database execution screenshots are included. The live MySQL result above is documented as observed, including its failed duplicate-profile check; the automated tests cover Python helper behavior and do not replace a database run.
