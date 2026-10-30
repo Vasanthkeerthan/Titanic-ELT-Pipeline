@@ -1,9 +1,16 @@
 .env
+.env.*
+!.env.example
 .venv/
 **/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 *.py[cod]
 *.tmp
 *.temp
 *.log
+.coverage
+htmlcov/
 .DS_Store
 Thumbs.db
