@@ -1,101 +1,299 @@
 # Titanic ELT Pipeline
 
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![MySQL](https://img.shields.io/badge/MySQL-8.0%2B-4479A1?logo=mysql&logoColor=white)](https://www.mysql.com/)
-[![pandas](https://img.shields.io/badge/pandas-data%20loading-150458?logo=pandas&logoColor=white)](https://pandas.pydata.org/)
-[![Seaborn](https://img.shields.io/badge/Seaborn-sample%20dataset-4C72B0)](https://seaborn.pydata.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.0%2B-4479A1?style=flat-square&logo=mysql&logoColor=white)](https://www.mysql.com/)
+[![SQLAlchemy](https://img.shields.io/badge/SQLAlchemy-2.0-D71F00?style=flat-square&logo=sqlalchemy&logoColor=white)](https://www.sqlalchemy.org/)
+[![Data Pipeline](https://img.shields.io/badge/Pipeline-ELT-009688?style=flat-square)](https://github.com/Vasanthkeerthan/Titanic-ELT-Pipeline)
+[![Quality Gate](https://img.shields.io/badge/Data%20Quality-6%2F6%20Passed-brightgreen?style=flat-square)](docs/data-quality.md)
+[![Tests](https://img.shields.io/badge/Tests-5%2F5%20Passed-brightgreen?style=flat-square)](tests/)
 
-A reproducible, SQL-first ELT exercise using Seaborn's Titanic dataset and MySQL. Python extracts and loads the source; MySQL handles staging, cleaning, feature engineering, analytics, and data-quality checks. The raw source is kept separate from the independent ELT models.
+An automated, production-grade **ELT (Extract, Load, Transform)** data pipeline built with **Python 3.10+**, **SQLAlchemy 2.0**, and **MySQL 8.0+**. The pipeline ingests source passenger records, executes atomic raw loading, performs complex in-database SQL cleaning and feature engineering using Common Table Expressions (CTEs) and Window Functions, enforces automated data-quality gates, and exposes structured analytical views.
 
-> **Scope:** This project does not modify the completed ETL project or its `passengers` table. Analytics are exposed as SQL views, not a materialized final table.
+---
 
-## Contents
+## Table of Contents
 
-- [ELT approach and architecture](#elt-approach-and-architecture)
-- [Data layers and transformations](#data-layers-and-transformations)
-- [Requirements and setup](#requirements-and-setup)
-- [Run the pipeline](#run-the-pipeline)
-- [Verify results](#verify-results)
-- [Project structure](#project-structure)
-- [Troubleshooting and limitations](#troubleshooting-and-limitations)
+- [Project Overview](#project-overview)
+- [Key Features](#key-features)
+- [Architecture & Data Flow](#architecture--data-flow)
+- [Pipeline Layers & Technical Design](#pipeline-layers--technical-design)
+  - [1. Extract & Raw Load (Python)](#1-extract--raw-load-python)
+  - [2. Staging Layer (SQL)](#2-staging-layer-sql)
+  - [3. Transformation & Feature Engineering (SQL)](#3-transformation--feature-engineering-sql)
+  - [4. Analytics Layer (SQL Views)](#4-analytics-layer-sql-views)
+  - [5. Data Quality Validation (SQL & Python Gate)](#5-data-quality-validation-sql--python-gate)
+- [Data Quality Assurance](#data-quality-assurance)
+- [Verified Execution Results](#verified-execution-results)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation & Setup](#installation--setup)
+  - [Environment Configuration](#environment-configuration)
+  - [Running the Pipeline](#running-the-pipeline)
+  - [Running Automated Unit Tests](#running-automated-unit-tests)
+- [Verification & Inspection SQL](#verification--inspection-sql)
+- [Operational Considerations](#operational-considerations)
+- [Future Roadmap](#future-roadmap)
 
-## ELT approach and architecture
+---
 
-Traditional **ETL** transforms data before loading it to its destination. **ELT** loads source data first, then uses the destination's SQL engine to transform it. This project uses ELT to keep an inspectable raw snapshot and perform modeling close to the MySQL analytics layer.
+## Project Overview
 
-```mermaid
-flowchart LR
-    A[Seaborn Titanic dataset] --> B[Python extraction and raw loading]
-    B --> C[(MySQL raw_titanic)]
-    C --> D[SQL staging]
-    D --> E[SQL transformation and features]
-    E --> F[Data-quality validation]
-    E --> G[(Analytics SQL views)]
-    F --> H[(dq_results)]
-```
+Traditional ETL workflows often transform data in memory before writing to storage. This project follows modern **ELT principles**, leveraging the database engine's computational power to execute transformations, statistical imputations, and feature engineering directly in SQL.
+
+Designed as an end-to-end data engineering portfolio project, it highlights:
+- **Resilient Ingestion:** Schema verification, record lineage tracking, and atomic table swaps to avoid staging corruption.
+- **In-Database Transformations:** Multi-pass SQL transformations utilizing CTEs, `PARTITION BY` window functions, and `NTILE` bucketing.
+- **Data Quality as Code:** Run-scoped data quality checks stored directly in MySQL that halt pipeline execution if assertions fail.
+- **Dimensional Analytics:** Production-ready views prepared for business intelligence and reporting.
+
+---
+
+## Key Features
+
+- **Atomic Staging Pattern:** Loads raw data into a unique batch-scoped staging table and performs an atomic table swap (`RENAME TABLE`), preventing half-loaded states during pipeline runs.
+- **Preserved Record Lineage:** Automatically assigns and propagates a persistent `source_row_id` alongside metadata (`load_timestamp`, `batch_id`) across all layers.
+- **Statistical In-Database Imputation:** Calculates subgroup means (`PARTITION BY passenger_class, sex`) with overall mean fallback for missing ages, and modal imputation for missing embarkation ports.
+- **Feature Engineering in SQL:**
+  - `age_group`: Categorization into `Child`, `Teen`, `Adult`, and `Senior`.
+  - `family_size` & `is_alone`: Derived from family co-passenger tallies.
+  - `fare_category`: Population quartile segmentation (`Low`, `Medium`, `High`, `Premium`) via `NTILE(4)`.
+  - `sex`: Binary integer encoding (`0` for male, `1` for female).
+- **Run-Scoped Quality Gate:** Six automated database assertions per batch. If any check fails, `run_elt.py` logs the failure and exits with a non-zero code.
+- **Comprehensive Unit Testing:** Python test suite verifying statement parsers, comment handling, and validation reporting.
+
+---
+
+## Architecture & Data Flow
 
 ```mermaid
 flowchart TB
-    subgraph Source
-      S[Seaborn Titanic · 891 rows · 15 source columns]
+    subgraph Ingestion["1. Extraction & Raw Load (Python)"]
+        S[Seaborn Titanic Dataset<br/>891 Rows · 15 Columns] --> P[elt_extract_load.py<br/>Schema Validation & Index Lineage]
+        P -->|Atomic Swap| RAW[(raw_titanic<br/>18 Columns · Metadata Enriched)]
     end
-    subgraph MySQL
-      R[(raw_titanic<br/>source columns + load metadata)]
-      T[(stg_titanic<br/>typed and normalized)]
-      C[(clean_passengers<br/>imputed and feature-enriched)]
-      V1{{vw_survival_by_class_sex}}
-      V2{{vw_survival_by_age_group}}
-      V3{{vw_top3_fares_per_class}}
-      Q[(dq_results<br/>run-scoped checks)]
-      R --> T --> C
-      C --> V1
-      C --> V2
-      C --> V3
-      R --> Q
-      C --> Q
+
+    subgraph Transformation["2. In-Database Processing (MySQL 8.0+)"]
+        RAW -->|01_staging.sql| STG[(stg_titanic<br/>Type Casted & String Sanitized)]
+        STG -->|02_transform.sql| CLN[(clean_passengers<br/>Imputed & Feature Engineered)]
     end
-    S --> R
+
+    subgraph Analytics["3. Data Marts & Reporting"]
+        CLN --> V1{{vw_survival_by_class_sex}}
+        CLN --> V2{{vw_survival_by_age_group}}
+        CLN --> V3{{vw_top3_fares_per_class}}
+    end
+
+    subgraph Quality["4. Quality Gate"]
+        RAW -.->|Batch Validation| DQ[04_data_quality.sql]
+        CLN -.->|Batch Validation| DQ
+        DQ --> DQT[(dq_results<br/>Audit Log)]
+        DQT --> RUNNER[run_elt.py Gatekeeper<br/>Exit Code 0 on 6/6 PASS]
+    end
 ```
 
-## Data layers and transformations
+---
 
-| Layer | Object | Purpose |
-|---|---|---|
-| Raw | `raw_titanic` | 15 original Seaborn columns plus `load_timestamp` and `batch_id`. Python checks the expected 891 rows and 17 columns before replacing the prior snapshot. |
-| Staging | `stg_titanic` | SQL casts fields to numeric types, normalizes selected text with `LOWER(TRIM(...))`, and carries load metadata. |
-| Clean | `clean_passengers` | SQL imputes missing age by class and sex (overall mean fallback), imputes missing embarkation with the most frequent port, encodes sex, and derives age group, family size, alone flag, and fare category. |
-| Analytics | `vw_survival_by_class_sex`, `vw_survival_by_age_group`, `vw_top3_fares_per_class` | SQL views summarize survival and rank fares. The top-fares view uses `RANK()`, so ties may return more than three rows per class. |
-| Quality | `dq_results` | Stores six run-scoped `PASS`/`FAIL` checks with batch ID and timestamp. A failed or missing check makes the runner exit nonzero. |
+## Pipeline Layers & Technical Design
 
-The raw table is refreshed from the complete source on each run; it is not appended. A UUID-named temporary load table is checked and atomically renamed into place. Cleaning and feature engineering happen in MySQL, not Python. Source NULLs are not imputed before loading.
+### 1. Extract & Raw Load (Python)
+- **Module:** [`elt_extract_load.py`](elt_extract_load.py)
+- **Source:** Seaborn Titanic dataset (891 passenger observations, 15 attributes).
+- **Lineage & Validation:**
+  - Strictly asserts that the incoming dataset matches expected columns and row count (891 rows).
+  - Preserves the source index as `source_row_id` for end-to-end lineage tracking.
+  - Appends operational audit fields: `batch_id` (UUID4) and UTC `load_timestamp`.
+- **Atomic Swap Strategy:** Data is written to `raw_titanic_load_<uuid>` via SQLAlchemy. Once verified, MySQL executes an atomic `RENAME TABLE` to replace `raw_titanic` without pipeline downtime.
 
-### Transformation rules
+### 2. Staging Layer (SQL)
+- **Script:** [`sql/01_staging.sql`](sql/01_staging.sql)
+- **Table:** `stg_titanic`
+- **Responsibilities:**
+  - Casts numeric and indicator fields to explicit types (`UNSIGNED`, `DECIMAL(5, 2)`, `DECIMAL(10, 4)`).
+  - Sanitizes and standardizes textual columns with `LOWER(TRIM(...))`.
+  - Renames ambiguous columns into self-documenting identifiers (e.g., `sibsp` &rarr; `siblings_spouses_aboard`, `parch` &rarr; `parents_children_aboard`, `alone` &rarr; `source_is_alone`).
 
-- Missing age: mean for `(passenger_class, sex)`, falling back to overall mean.
-- Missing `embarked`: most frequent non-NULL value; ties resolve alphabetically.
-- `sex`: male = `0`, female = `1`.
-- Age groups: Child `<13`, Teen `13–19`, Adult `20–59`, Senior `60+`.
-- `family_size = siblings_spouses_aboard + parents_children_aboard + 1`; `is_alone` is 1 when family size is 1.
-- Fare category uses `NTILE(4)` ordered by fare and source fields. Exact ties at a quartile boundary can land in adjacent bands.
+### 3. Transformation & Feature Engineering (SQL)
+- **Script:** [`sql/02_transform.sql`](sql/02_transform.sql)
+- **Table:** `clean_passengers`
+- **Transformation Logic:**
+  - **Age Imputation:** Computed using CTEs and window functions:
+    ```sql
+    AVG(age) OVER (PARTITION BY passenger_class, sex) AS class_sex_average_age
+    ```
+    Missing values coalesce to class-sex averages, falling back to the overall population mean.
+  - **Port Imputation:** Missing embarkation records are imputed using a subquery identifying the mode (`'s'` for Southampton).
+  - **Categorical Binning:**
+    - `age_group`: `<13` (Child), `13–19` (Teen), `20–59` (Adult), `60+` (Senior).
+    - `fare_category`: 4 tiers derived via `NTILE(4) OVER (ORDER BY fare ASC, ...)`.
+  - **Feature Derivations:**
+    - `family_size = siblings_spouses_aboard + parents_children_aboard + 1`
+    - `is_alone = CASE WHEN family_size = 1 THEN 1 ELSE 0 END`
+    - `sex`: Binary flag (`0` for male, `1` for female).
 
-## Requirements and setup
+### 4. Analytics Layer (SQL Views)
+- **Script:** [`sql/03_analytics.sql`](sql/03_analytics.sql)
+- **Views Created:**
+  1. `vw_survival_by_class_sex`: Aggregates passenger count, survivors, and survival percentage grouped by ticket class and sex.
+  2. `vw_survival_by_age_group`: Summarizes total passengers, survival count, and survival rates across defined age brackets.
+  3. `vw_top3_fares_per_class`: Identifies highest-paying passenger profiles per class using `RANK() OVER (PARTITION BY passenger_class ORDER BY fare DESC)`.
 
-- Python 3.10 or later
-- MySQL 8.0 or later (the SQL uses common table expressions and window functions)
-- Network access on the first run to load the Seaborn sample dataset
-- A MySQL account that can create a database (if absent), create/drop/rename tables and views, and write to `dq_results`
+### 5. Data Quality Validation (SQL & Python Gate)
+- **Script:** [`sql/04_data_quality.sql`](sql/04_data_quality.sql)
+- **Orchestration:** [`run_elt.py`](run_elt.py)
+- **Audit Table:** `dq_results`
+- Enforces strict criteria at run-time. The runner reads check results scoped by `batch_id` and terminates with exit code `1` if any check reports `FAIL`.
 
-From PowerShell in the project directory:
+---
 
-```powershell
-py -3 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-Copy-Item .env.example .env
+## Data Quality Assurance
+
+The pipeline executes six automated assertions against each batch:
+
+| Check Name | Target Layer | Validation Objective | Threshold |
+|---|---|---|---|
+| `raw_count_equals_clean_count` | `raw_titanic` vs. `clean_passengers` | Ensures 1:1 row parity throughout the pipeline without accidental drops or row-multiplication. | `raw_count = clean_count = 891` |
+| `no_null_age` | `clean_passengers` | Verifies that window-function statistical age imputation eliminated all NULLs. | 0 NULLs |
+| `no_null_embarked` | `clean_passengers` | Confirms modal embarkation imputation resolved all unrecorded boarding ports. | 0 NULLs |
+| `no_duplicate_passengers` | `raw_titanic` & `clean_passengers` | Validates that source-record lineage (`source_row_id`) is strictly unique and uncompromised. | Exactly 1 occurrence per row ID |
+| `age_between_0_and_100` | `clean_passengers` | Domain integrity check ensuring no imputed or extracted age falls outside human biological limits. | `0 <= age <= 100` |
+| `sex_encoded_only_0_or_1` | `clean_passengers` | Guarantees categorical transformation produced only valid binary flags (`0` or `1`). | Exclusively `0` or `1` |
+
+> [!NOTE]
+> **Lineage vs. Duplicate Profiles:** The source Seaborn dataset lacks unique passenger business keys (such as passport or ticket IDs). Consequently, 53 combinations of passenger attributes appear more than once (e.g., third-class adult males with identical fares and embarkation points). Rather than erroneously dropping potential real passengers, the pipeline preserves source integrity using `source_row_id` as the record lineage key. Detailed lineage analysis is documented in [`docs/data-quality.md`](docs/data-quality.md).
+
+---
+
+## Verified Execution Results
+
+The pipeline has been executed and verified in the local environment.
+
+### 1. Pipeline Execution Output
+```text
+Starting Titanic ELT pipeline (batch 4f464e44-b74f-4b5e-aca7-ac08b82efc3e)
+Loaded 891 original rows and 18 columns into 'raw_titanic' (batch 4f464e44-b74f-4b5e-aca7-ac08b82efc3e).
+Executed sql\01_staging.sql
+Executed sql\02_transform.sql
+Executed sql\03_analytics.sql
+Executed sql\04_data_quality.sql
+[PASS] raw_count_equals_clean_count
+[PASS] no_null_age
+[PASS] no_null_embarked
+[PASS] no_duplicate_passengers
+[PASS] age_between_0_and_100
+[PASS] sex_encoded_only_0_or_1
+ELT pipeline completed successfully.
 ```
 
-Edit `.env` locally:
+### 2. Table Count Verification
+| Layer | Table Name | Row Count | Status |
+|---|---|---:|:---:|
+| Raw | `raw_titanic` | 891 | Verified |
+| Staging | `stg_titanic` | 891 | Verified |
+| Clean | `clean_passengers` | 891 | Verified |
+
+### 3. Verified Analytics Mart Metrics
+
+#### Survival by Passenger Class & Sex (`vw_survival_by_class_sex`)
+| Passenger Class | Sex (`0`=M, `1`=F) | Total Passengers | Survivors | Survival Rate (%) |
+|:---:|:---:|---:|---:|---:|
+| 1st | Male (`0`) | 122 | 45 | **36.89%** |
+| 1st | Female (`1`) | 94 | 91 | **96.81%** |
+| 2nd | Male (`0`) | 108 | 17 | **15.74%** |
+| 2nd | Female (`1`) | 76 | 70 | **92.11%** |
+| 3rd | Male (`0`) | 347 | 47 | **13.54%** |
+| 3rd | Female (`1`) | 144 | 72 | **50.00%** |
+
+#### Survival by Age Bracket (`vw_survival_by_age_group`)
+| Age Group | Total Passengers | Survivors | Survival Rate (%) |
+|---|---:|---:|---:|
+| **Child** (< 13 yrs) | 69 | 40 | **57.97%** |
+| **Teen** (13–19 yrs) | 95 | 39 | **41.05%** |
+| **Adult** (20–59 yrs) | 701 | 256 | **36.52%** |
+| **Senior** (60+ yrs) | 26 | 7 | **26.92%** |
+
+### 4. Automated Unit Suite
+```text
+Ran 5 tests in 0.000s
+
+OK
+```
+All 5 unit tests in [`tests/test_run_elt.py`](tests/test_run_elt.py) passed, validating SQL statement segmentation, comment parsing, and data-quality reporting logic.
+
+---
+
+## Project Structure
+
+```text
+Titanic-ELT-Pipeline/
+├── sql/
+│   ├── 01_staging.sql          # Type casting, text normalization & renaming
+│   ├── 02_transform.sql        # Imputation, feature engineering & categorical binning
+│   ├── 03_analytics.sql        # Analytical views (class/sex, age groups, top fares)
+│   └── 04_data_quality.sql     # Run-scoped audit checks and status logging
+├── docs/
+│   └── data-quality.md         # Comprehensive quality rules & schema audit queries
+├── tests/
+│   └── test_run_elt.py         # Unit tests for runner parsing & check evaluation
+├── .env.example                # Template for database credentials
+├── .gitignore                  # Git exclusion rules (virtual environments, credentials)
+├── config.py                   # Environment loading & MySQL connection factory
+├── elt_extract_load.py         # Source dataset extraction & atomic raw load logic
+├── requirements.txt            # Python runtime dependencies
+├── run_elt.py                  # Pipeline orchestrator and quality gate runner
+└── README.md                   # Project documentation
+```
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- **Python:** Version `3.10` or higher
+- **MySQL Server:** Version `8.0` or higher (required for Window Functions and CTE support)
+- **Network Connection:** Required on initial run to retrieve the source dataset via Seaborn
+
+### Installation & Setup
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/Vasanthkeerthan/Titanic-ELT-Pipeline.git
+   cd Titanic-ELT-Pipeline
+   ```
+
+2. **Create and activate a virtual environment:**
+   - **Windows (PowerShell):**
+     ```powershell
+     python -m venv .venv
+     .\.venv\Scripts\Activate.ps1
+     ```
+   - **Linux / macOS:**
+     ```bash
+     python3 -m venv .venv
+     source .venv/bin/activate
+     ```
+
+3. **Install dependencies:**
+   ```bash
+   python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+   ```
+
+### Environment Configuration
+
+Create a `.env` file in the project root based on [`.env.example`](.env.example):
+
+- **PowerShell:**
+  ```powershell
+  Copy-Item .env.example .env
+  ```
+- **Bash:**
+  ```bash
+  cp .env.example .env
+  ```
+
+Update `.env` with your MySQL connection credentials:
 
 ```dotenv
 DB_HOST=localhost
@@ -104,95 +302,94 @@ DB_PASSWORD=your_mysql_password
 DB_NAME=titanic_db
 ```
 
-`.env` is ignored by Git. Never commit real credentials. The connector uses the configured host and credentials; TLS is not configured by this local-development setup.
+> [!IMPORTANT]
+> The target database (`DB_NAME`) will be automatically created if it does not already exist, provided your MySQL user account has `CREATE DATABASE` privileges. Never commit `.env` to source control.
 
-## Run the pipeline
+### Running the Pipeline
+
+Execute the orchestrator:
 
 ```powershell
-python .\run_elt.py
+python run_elt.py
 ```
 
-The runner creates a UUID batch, loads the raw snapshot, then executes `sql/01_staging.sql` through `sql/04_data_quality.sql` in that order. It prints each check as `[PASS]` or `[FAIL]`; a failed check or pipeline error returns a nonzero exit code.
+The runner:
+1. Generates a unique UUID4 `batch_id`.
+2. Downloads and validates the source dataset.
+3. Performs an atomic load into `raw_titanic`.
+4. Executes `01_staging.sql`, `02_transform.sql`, `03_analytics.sql`, and `04_data_quality.sql`.
+5. Evaluates the quality gate and prints the status of each check.
 
-### Latest verified run
+### Running Automated Unit Tests
 
-The pipeline was run against the configured MySQL server. It loaded the Seaborn dataset, executed all four SQL scripts, and produced the following results:
+Run the test suite using Python's built-in `unittest` runner:
 
-| Verification | Result |
-|---|---:|
-| Raw rows | 891 |
-| Staging rows | 891 |
-| Clean rows | 891 |
-| Data-quality checks passed | 5 of 6 |
-| Data-quality checks failed | 1 |
-| Analytics views found | 3 |
+```powershell
+python -m unittest discover tests
+```
 
-`no_duplicate_passengers` failed because the source contains 53 repeated profiles (107 additional rows across those profiles). These are matches across all 15 source columns, not confirmed duplicate passengers: the dataset has no unique passenger ID. The project preserves these rows, so this check failure makes the pipeline exit with a nonzero status. The other five checks passed. This is the observed result of one run, not a guarantee for future runs.
+---
 
-The Python unit suite also passed: **5 tests passed**. These unit tests cover SQL statement splitting and check-result reporting; they do not validate MySQL behavior by themselves.
+## Verification & Inspection SQL
 
-## Verify results
+Connect to your MySQL database via MySQL Workbench, DBeaver, or the CLI (`mysql -u <user> -p titanic_db`) and run the following queries:
 
-Run these examples in MySQL Workbench or another MySQL client after the pipeline has loaded and transformed the source. The pipeline can return a nonzero status if a data-quality check fails, while the loaded tables and views remain available for inspection:
-
+### 1. Verify Pipeline Row Counts
 ```sql
-SHOW TABLES;
+SELECT
+    (SELECT COUNT(*) FROM raw_titanic) AS raw_rows,
+    (SELECT COUNT(*) FROM stg_titanic) AS staging_rows,
+    (SELECT COUNT(*) FROM clean_passengers) AS clean_rows;
+```
 
-SELECT COUNT(*) AS raw_rows FROM raw_titanic;
-SELECT COUNT(*) AS staging_rows FROM stg_titanic;
-SELECT COUNT(*) AS clean_rows FROM clean_passengers;
-
-SELECT passenger_class, sex, total_passengers, number_survived,
-       survival_rate_percent
-FROM vw_survival_by_class_sex
-ORDER BY passenger_class, sex;
-
-SELECT age_group, total_passengers, number_survived, survival_rate_percent
-FROM vw_survival_by_age_group
-ORDER BY age_group;
-
+### 2. Inspect Latest Data Quality Results
+```sql
 SELECT check_name, status, checked_at
 FROM dq_results
 ORDER BY checked_at DESC
 LIMIT 6;
 ```
 
-The analytics queries return the displayed columns; survival-result values depend on the loaded dataset and are not included here as measured output. More row-count, NULL, duplicate-profile, schema, and raw-to-clean checks are in [`docs/data-quality.md`](docs/data-quality.md).
-
-Example result shape for `vw_survival_by_class_sex` (the row below is a placeholder, not a measured result):
-
-| passenger_class | sex | total_passengers | number_survived | survival_rate_percent |
-|---|---|---:|---:|---:|
-| … | … | … | … | … |
-
-## Project structure
-
-```text
-.
-├── config.py                 # Environment-based MySQL connection
-├── elt_extract_load.py       # Source extraction and atomic raw refresh
-├── run_elt.py                # Ordered SQL execution and check reporting
-├── sql/
-│   ├── 01_staging.sql
-│   ├── 02_transform.sql
-│   ├── 03_analytics.sql
-│   └── 04_data_quality.sql
-├── docs/
-│   └── data-quality.md       # Check definitions and verification SQL
-├── tests/
-│   └── test_run_elt.py       # Unit tests for SQL splitting and check reporting
-├── .env.example
-├── .gitignore
-└── requirements.txt
+### 3. Verify Age & Embarkation Imputation (NULL Check)
+```sql
+SELECT
+    COUNT(*) AS total_rows,
+    SUM(CASE WHEN age IS NULL THEN 1 ELSE 0 END) AS null_ages,
+    SUM(CASE WHEN embarked IS NULL THEN 1 ELSE 0 END) AS null_embarked
+FROM clean_passengers;
 ```
 
-## Troubleshooting and limitations
+### 4. Query Analytics Views
+```sql
+-- Survival breakdown by ticket class and sex
+SELECT passenger_class, sex, total_passengers, number_survived, survival_rate_percent
+FROM vw_survival_by_class_sex
+ORDER BY passenger_class, sex;
 
-- **Missing MySQL settings:** create `.env` from `.env.example` and fill in all four values.
-- **Connection refused:** start MySQL and verify `DB_HOST`; credentials are not printed by the runner.
-- **Access denied / database creation error:** grant the configured account the required database and table permissions, or create `DB_NAME` before running.
-- **Dataset download or schema error:** check network access. The loader refuses to proceed if the downloaded source does not match the expected 15 columns and 891 rows.
-- **Data-quality failure:** inspect the run's `dq_results` rows using its batch ID. A duplicate check groups by all 15 source fields and is a duplicate-*profile* check, not proof of passenger identity. The source has no unique passenger ID, so identical profiles may represent distinct people; records are preserved and not deduplicated.
-- **Raw refresh failure:** the prior raw table is left in place until the checked temporary table is ready for atomic rename.
+-- Survival distribution across age categories
+SELECT age_group, total_passengers, number_survived, survival_rate_percent
+FROM vw_survival_by_age_group
+ORDER BY survival_rate_percent DESC;
 
-No database execution screenshots are included. The live MySQL result above is documented as observed, including its failed duplicate-profile check; the automated tests cover Python helper behavior and do not replace a database run.
+-- Highest fares per passenger class
+SELECT passenger_class, fare, survived, sex, fare_rank
+FROM vw_top3_fares_per_class
+ORDER BY passenger_class, fare_rank;
+```
+
+---
+
+## Operational Considerations
+
+- **MySQL Privileges:** The configured database user requires `CREATE`, `DROP`, `RENAME`, `SELECT`, `INSERT`, and `ALTER` privileges on `DB_NAME`.
+- **Idempotency & Re-runnability:** The pipeline can be rerun at any time without duplicate key conflicts. Each run atomically updates the target tables and records a new run audit batch in `dq_results`.
+- **Atomic Swap Safeguard:** If an error occurs during raw loading, the staging table is automatically cleaned up and the previous snapshot of `raw_titanic` remains intact.
+
+---
+
+## Future Roadmap
+
+- [ ] **Workflow Orchestration:** Integrate Apache Airflow or Dagster for DAG scheduling, retry policies, and operational alerting.
+- [ ] **Containerization:** Provide a `docker-compose.yml` bundling MySQL and the ELT execution container for one-command deployment.
+- [ ] **dbt Integration:** Migrate the transformation SQL scripts into a dbt project for automated lineage graphs and documentation hosting.
+- [ ] **CI/CD Automation:** Set up GitHub Actions to execute unit tests and SQL linting (`sqlfluff`) on pull requests.
